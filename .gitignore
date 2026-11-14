@@ -8,3 +8,4 @@ server/media/*
 !server/media/.gitkeep
 server/uploads/*
 !server/uploads/.gitkeep
+*.tsbuildinfo
