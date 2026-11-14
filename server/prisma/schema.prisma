@@ -1,0 +1,539 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────────────────────── Users & auth ─────────────────────────────
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum Theme {
+  LIGHT
+  DARK
+}
+
+enum PlanTier {
+  FREE
+  BRONZE
+  SILVER
+  GOLD
+}
+
+model User {
+  id               String    @id @default(cuid())
+  email            String    @unique
+  username         String    @unique
+  name             String
+  phone            String?
+  passwordHash     String
+  avatarUrl        String?
+  role             Role      @default(USER)
+  // Theme: null until first login sets it from IST login time; manual changes win afterwards.
+  theme            Theme?
+  themeManuallySet Boolean   @default(false)
+  city             String?
+  state            String?
+  country          String?
+  plan             PlanTier  @default(FREE)
+  planExpiresAt    DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  sessions          Session[]
+  loginEvents       LoginEvent[]
+  otpChallenges     OtpChallenge[]
+  trustedDevices    TrustedDevice[]
+  watchProgress     WatchProgress[]
+  dailyUsage        DailyUsage[]
+  subscriptions     Subscription[]
+  payments          Payment[]
+  downloads         Download[]
+  comments          Comment[]
+  commentReactions  CommentReaction[]
+  commentReports    CommentReport[]
+  commentAttempts   CommentAttempt[]
+  mentions          CommentMention[]
+  moderationActions ModerationAction[]
+  hostedMeetings    Meeting[]
+  meetingSeats      MeetingParticipant[]
+  meetingMessages   MeetingChatMessage[]
+  recordings        MeetingRecording[]
+}
+
+model Session {
+  id              String         @id @default(cuid())
+  userId          String
+  user            User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  trustedDeviceId String?
+  trustedDevice   TrustedDevice? @relation(fields: [trustedDeviceId], references: [id], onDelete: SetNull)
+  ip              String?
+  browser         String?
+  os              String?
+  deviceType      String?
+  city            String?
+  createdAt       DateTime       @default(now())
+  lastSeenAt      DateTime       @default(now())
+  revokedAt       DateTime?
+
+  @@index([userId])
+}
+
+enum LoginStatus {
+  SUCCESS
+  FAILED_PASSWORD
+  OTP_REQUIRED
+  OTP_VERIFIED
+  OTP_FAILED
+  BLOCKED
+}
+
+model LoginEvent {
+  id             String      @id @default(cuid())
+  userId         String?
+  user           User?       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  email          String
+  status         LoginStatus
+  reasons        String[] // why OTP was required: NEW_BROWSER, NEW_DEVICE, NEW_IP, NEW_LOCATION
+  ip             String?
+  browser        String?
+  browserVersion String?
+  os             String?
+  osVersion      String?
+  deviceType     String? // Desktop | Mobile | Tablet
+  deviceModel    String?
+  city           String?
+  state          String?
+  country        String?
+  latitude       Float?
+  longitude      Float?
+  userAgent      String?
+  createdAt      DateTime    @default(now())
+
+  @@index([userId, createdAt])
+}
+
+enum OtpChannel {
+  EMAIL
+  SMS
+}
+
+model OtpChallenge {
+  id         String     @id @default(cuid())
+  userId     String
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  codeHash   String
+  channel    OtpChannel
+  attempts   Int        @default(0)
+  expiresAt  DateTime
+  consumedAt DateTime?
+  // Snapshot of the login context (fingerprint, geo, ua) so verification can trust the same device.
+  context    Json
+  createdAt  DateTime   @default(now())
+
+  @@index([userId])
+}
+
+model TrustedDevice {
+  id           String    @id @default(cuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Stable per-browser id (cookie) + hashed browser/os/deviceType.
+  deviceKey    String
+  fingerprint  String
+  label        String
+  browser      String?
+  os           String?
+  deviceType   String?
+  lastIp       String?
+  lastCity     String?
+  lastState    String?
+  trustedUntil DateTime
+  // Allowed to download when DOWNLOADS_REQUIRE_REGISTERED_DEVICE is on.
+  downloadsEnabled Boolean @default(true)
+  revokedAt    DateTime?
+  lastUsedAt   DateTime  @default(now())
+  createdAt    DateTime  @default(now())
+
+  sessions Session[]
+
+  @@unique([userId, deviceKey])
+}
+
+// ───────────────────────────── Videos & watching ─────────────────────────────
+
+model Video {
+  id            String   @id @default(cuid())
+  title         String
+  description   String   @default("")
+  // Paths relative to server/media (served via /api/media) or absolute URLs.
+  videoPath     String
+  thumbnailPath String?
+  captionsPath  String?
+  durationSec   Int      @default(0)
+  fileSizeBytes BigInt   @default(0)
+  isPremium     Boolean  @default(false)
+  isDownloadable Boolean @default(true)
+  channelName   String   @default("StreamHub")
+  views         Int      @default(0)
+  createdAt     DateTime @default(now())
+
+  progress  WatchProgress[]
+  downloads Download[]
+  comments  Comment[]
+}
+
+model WatchProgress {
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  videoId     String
+  video       Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  positionSec Float    @default(0)
+  durationSec Float    @default(0)
+  completed   Boolean  @default(false)
+  updatedAt   DateTime @updatedAt
+
+  @@id([userId, videoId])
+}
+
+// Per-day usage counters (IST date string YYYY-MM-DD) for watch-time limits.
+model DailyUsage {
+  userId       String
+  user         User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  date         String
+  watchSeconds Int    @default(0)
+
+  @@id([userId, date])
+}
+
+// ───────────────────────────── Subscriptions & payments ─────────────────────────────
+
+enum BillingPeriod {
+  MONTHLY
+  QUARTERLY
+  YEARLY
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  EXPIRED
+  CANCELLED // auto-renew off; stays usable until expiry
+  SUPERSEDED // replaced by an upgrade/downgrade
+}
+
+model Subscription {
+  id          String             @id @default(cuid())
+  userId      String
+  user        User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan        PlanTier
+  period      BillingPeriod
+  status      SubscriptionStatus @default(ACTIVE)
+  startDate   DateTime
+  expiryDate  DateTime
+  autoRenew   Boolean            @default(true)
+  cancelledAt DateTime?
+  createdAt   DateTime           @default(now())
+
+  payments Payment[]
+
+  @@index([userId, status])
+}
+
+enum PaymentStatus {
+  CREATED
+  PAID
+  FAILED
+  CANCELLED
+}
+
+enum PaymentAction {
+  NEW
+  UPGRADE
+  DOWNGRADE
+  RENEW
+}
+
+model Payment {
+  id                String        @id @default(cuid())
+  userId            String
+  user              User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subscriptionId    String?
+  subscription      Subscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+  plan              PlanTier
+  period            BillingPeriod
+  action            PaymentAction
+  amount            Int // paise
+  currency          String        @default("INR")
+  status            PaymentStatus @default(CREATED)
+  razorpayOrderId   String        @unique
+  razorpayPaymentId String?       @unique
+  razorpaySignature String?
+  invoiceNumber     String?       @unique
+  failureReason     String?
+  emailSentAt       DateTime?
+  createdAt         DateTime      @default(now())
+  paidAt            DateTime?
+
+  @@index([userId, createdAt])
+}
+
+// ───────────────────────────── Downloads ─────────────────────────────
+
+enum DownloadStatus {
+  AUTHORIZED
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+  INTERRUPTED
+}
+
+model Download {
+  id              String         @id @default(cuid())
+  userId          String
+  user            User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  videoId         String
+  video           Video          @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  plan            PlanTier
+  status          DownloadStatus @default(AUTHORIZED)
+  countsToQuota   Boolean        @default(true)
+  // One-time, short-lived token used by the file endpoint.
+  token           String         @unique
+  tokenExpiresAt  DateTime
+  fileSizeBytes   BigInt         @default(0)
+  bytesSent       BigInt         @default(0)
+  ip              String?
+  userAgent       String?
+  browser         String?
+  os              String?
+  deviceType      String?
+  deviceKey       String?
+  failureReason   String?
+  quotaDate       String // IST YYYY-MM-DD the download was counted against
+  createdAt       DateTime       @default(now())
+  startedAt       DateTime?
+  completedAt     DateTime?
+
+  @@index([userId, createdAt])
+  @@index([userId, videoId, createdAt])
+}
+
+// ───────────────────────────── Comments ─────────────────────────────
+
+enum CommentStatus {
+  VISIBLE
+  FLAGGED // reported; still visible until an admin decides
+  HIDDEN // admin hid it
+  DELETED // soft-deleted by author; kept as placeholder if it has replies
+}
+
+enum ReactionType {
+  LIKE
+  DISLIKE
+}
+
+enum ReportReason {
+  SPAM
+  HARASSMENT
+  OFFENSIVE
+  HATE_SPEECH
+  MISINFORMATION
+  OTHER
+}
+
+enum ReportStatus {
+  OPEN
+  RESOLVED_REMOVED
+  RESOLVED_KEPT
+}
+
+model Comment {
+  id           String        @id @default(cuid())
+  videoId      String
+  video        Video         @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  userId       String
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  parentId     String?
+  parent       Comment?      @relation("Replies", fields: [parentId], references: [id], onDelete: SetNull)
+  replies      Comment[]     @relation("Replies")
+  content      String
+  language     String?
+  contentHash  String
+  city         String?
+  country      String?
+  status       CommentStatus @default(VISIBLE)
+  likeCount    Int           @default(0)
+  dislikeCount Int           @default(0)
+  // Optimistic-concurrency version for simultaneous edits.
+  version      Int           @default(1)
+  editedAt     DateTime?
+  deletedAt    DateTime?
+  createdAt    DateTime      @default(now())
+
+  reactions    CommentReaction[]
+  edits        CommentEdit[]
+  mentions     CommentMention[]
+  reports      CommentReport[]
+  translations CommentTranslation[]
+  moderation   ModerationAction[]
+
+  @@index([videoId, createdAt])
+  @@index([parentId])
+}
+
+model CommentReaction {
+  userId    String
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  commentId String
+  comment   Comment      @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  type      ReactionType
+  createdAt DateTime     @default(now())
+
+  @@id([userId, commentId])
+}
+
+model CommentEdit {
+  id              String   @id @default(cuid())
+  commentId       String
+  comment         Comment  @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  previousContent String
+  version         Int
+  editedAt        DateTime @default(now())
+}
+
+model CommentMention {
+  commentId String
+  comment   Comment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([commentId, userId])
+}
+
+model CommentReport {
+  id         String       @id @default(cuid())
+  commentId  String
+  comment    Comment      @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  reporterId String
+  reporter   User         @relation(fields: [reporterId], references: [id], onDelete: Cascade)
+  reason     ReportReason
+  details    String?
+  status     ReportStatus @default(OPEN)
+  createdAt  DateTime     @default(now())
+  resolvedAt DateTime?
+
+  @@unique([commentId, reporterId])
+}
+
+model CommentTranslation {
+  commentId  String
+  comment    Comment  @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  targetLang String
+  text       String
+  sourceLang String?
+  createdAt  DateTime @default(now())
+
+  @@id([commentId, targetLang])
+}
+
+model ModerationAction {
+  id          String   @id @default(cuid())
+  commentId   String
+  comment     Comment  @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  moderatorId String
+  moderator   User     @relation(fields: [moderatorId], references: [id], onDelete: Cascade)
+  action      String // HIDE | RESTORE | DISMISS_REPORTS
+  note        String?
+  createdAt   DateTime @default(now())
+}
+
+// Every post attempt, accepted or blocked — drives rate limiting, CAPTCHA and the audit log.
+model CommentAttempt {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accepted    Boolean
+  blockReason String? // PROFANITY | SPAM | DUPLICATE | REPEATED_CHARS | MALICIOUS_LINK | RATE_LIMIT | CAPTCHA
+  content     String
+  ip          String?
+  createdAt   DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+// ───────────────────────────── Meetings ─────────────────────────────
+
+enum MeetingRole {
+  HOST
+  COHOST
+  PARTICIPANT
+}
+
+model Meeting {
+  id              String    @id @default(cuid())
+  roomCode        String    @unique
+  title           String
+  hostId          String
+  host            User      @relation(fields: [hostId], references: [id], onDelete: Cascade)
+  passcodeHash    String?
+  isLocked        Boolean   @default(false)
+  maxParticipants Int       @default(8)
+  allowScreenShare Boolean  @default(true)
+  allowChat       Boolean   @default(true)
+  startedAt       DateTime?
+  endedAt         DateTime?
+  createdAt       DateTime  @default(now())
+
+  participants MeetingParticipant[]
+  messages     MeetingChatMessage[]
+  recordings   MeetingRecording[]
+}
+
+model MeetingParticipant {
+  id         String      @id @default(cuid())
+  meetingId  String
+  meeting    Meeting     @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role       MeetingRole @default(PARTICIPANT)
+  canScreenShare Boolean?  // null = follow meeting default
+  canChat    Boolean?
+  removed    Boolean     @default(false)
+  joinedAt   DateTime    @default(now())
+  leftAt     DateTime?
+
+  @@unique([meetingId, userId])
+}
+
+model MeetingChatMessage {
+  id        String   @id @default(cuid())
+  meetingId String
+  meeting   Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind      String   @default("text") // text | file
+  content   String
+  fileUrl   String?
+  fileName  String?
+  fileSize  Int?
+  createdAt DateTime @default(now())
+
+  @@index([meetingId, createdAt])
+}
+
+model MeetingRecording {
+  id          String   @id @default(cuid())
+  meetingId   String
+  meeting     Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  hostId      String
+  host        User     @relation(fields: [hostId], references: [id], onDelete: Cascade)
+  filePath    String
+  sizeBytes   Int
+  durationSec Int      @default(0)
+  createdAt   DateTime @default(now())
+}

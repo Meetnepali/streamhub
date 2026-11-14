@@ -1,0 +1,27 @@
+# Local dev services. Run: docker compose up -d
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: streamhub
+      POSTGRES_PASSWORD: streamhub
+      POSTGRES_DB: streamhub
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U streamhub"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Catches all outgoing email (OTP, invoices). Web UI: http://localhost:8025
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
+volumes:
+  pgdata:
